@@ -29,6 +29,12 @@ config TARGET_PUMA_RK3399
 	   * HDMI, eDP, MIPI-DSI, MIPI-DSI/CSI and MIPI-CSI
 	   * SPI, I2C, I2S, UART, GPIO, ...
 
+config TARGET_NANOPI_NEO4
+	bool "NanoPi NEO4 board"
+	select BOARD_LATE_INIT
+	help
+	  NanoPi NEO4
+
 endchoice
 
 config SYS_SOC
@@ -39,5 +45,7 @@ config SYS_MALLOC_F_LEN
 
 source "board/rockchip/evb_rk3399/Kconfig"
 source "board/theobroma-systems/puma_rk3399/Kconfig"
+
+source "board/friendlyarm/nanopi_neo4/Kconfig"
 
 endif

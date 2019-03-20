@@ -388,113 +388,10 @@ int rockchip_read_resource_file(void *buf, const char *name,
 	return ret;
 }
 
-#define is_digit(c)		((c) >= '0' && (c) <= '9')
-#define is_abcd(c)		((c) >= 'a' && (c) <= 'd')
-#define is_equal(c)		((c) == '=')
-
 #define DTB_FILE		"rk-kernel.dtb"
-#define KEY_WORDS_ADC_CTRL	"#_"
-#define KEY_WORDS_ADC_CH	"_ch"
-#define KEY_WORDS_GPIO		"#gpio"
 #define GPIO_EXT_PORT		0x50
 #define MAX_ADC_CH_NR		10
 #define MAX_GPIO_NR		10
-
-#ifdef CONFIG_ADC
-/*
- * How to make it works ?
- *
- * 1. pack dtb into rockchip resource.img, require:
- *    (1) file name end with ".dtb";
- *    (2) file name contains key words, like: ...#_[controller]_ch[channel]=[value]...dtb
- *	  @controller: adc controller name in dts, eg. "saradc", ...;
- *	  @channel: adc channel;
- *	  @value: adc value;
- *    eg: ...#_saradc_ch1=223#_saradc_ch2=650....dtb
- *
- * 2. U-Boot dtsi about adc controller node:
- *    (1) enable "u-boot,dm-pre-reloc;";
- *    (2) must set status "okay";
- */
-static int rockchip_read_dtb_by_adc(const char *file_name)
-{
-	static int cached_v[MAX_ADC_CH_NR];
-	int offset_ctrl = strlen(KEY_WORDS_ADC_CTRL);
-	int offset_ch = strlen(KEY_WORDS_ADC_CH);
-	int ret, channel, len = 0, found = 0, margin = 30;
-	uint32_t raw_adc;
-	unsigned long dtb_adc;
-	char *stradc, *strch, *p;
-	char adc_v_string[10];
-	char dev_name[32];
-
-	debug("%s: %s\n", __func__, file_name);
-
-	/* Invalid format ? */
-	stradc = strstr(file_name, KEY_WORDS_ADC_CTRL);
-	while (stradc) {
-		debug("   - substr: %s\n", stradc);
-
-		/* Parse controller name */
-		strch = strstr(stradc, KEY_WORDS_ADC_CH);
-		len = strch - (stradc + offset_ctrl);
-		strlcpy(dev_name, stradc + offset_ctrl, len + 1);
-
-		/* Parse adc channel */
-		p = strch + offset_ch;
-		if (is_digit(*p) && is_equal(*(p + 1))) {
-			channel = *p - '0';
-		} else {
-			debug("   - invalid format: %s\n", stradc);
-			return -EINVAL;
-		}
-
-		/*
-		 * Read raw adc value
-		 *
-		 * It doesn't need to read adc value every loop, reading once
-		 * is enough. We use cached_v[] to save what we have read, zero
-		 * means not read before.
-		 */
-		if (cached_v[channel] == 0) {
-			ret = adc_channel_single_shot(dev_name,
-						      channel, &raw_adc);
-			if (ret) {
-				debug("   - failed to read adc, ret=%d\n", ret);
-				return ret;
-			}
-			cached_v[channel] = raw_adc;
-		}
-
-		/* Parse dtb adc value */
-		p = strch + offset_ch + 2;	/* 2: channel and '=' */
-		while (*p && is_digit(*p)) {
-			len++;
-			p++;
-		}
-		strlcpy(adc_v_string, strch + offset_ch + 2, len + 1);
-		dtb_adc = simple_strtoul(adc_v_string, NULL, 10);
-
-		if (abs(dtb_adc - cached_v[channel]) <= margin) {
-			found = 1;
-			stradc = strstr(p, KEY_WORDS_ADC_CTRL);
-		} else {
-			found = 0;
-			break;
-		}
-
-		debug("   - parse: controller=%s, channel=%d, dtb_adc=%ld, read=%d %s\n",
-		      dev_name, channel, dtb_adc, cached_v[channel], found ? "(Y)" : "");
-	}
-
-	return found ? 0 : -ENOENT;
-}
-#else
-static int rockchip_read_dtb_by_adc(const char *file_name)
-{
-	return  -ENOENT;
-}
-#endif
 
 static int gpio_parse_base_address(fdt_addr_t *gpio_base_addr)
 {
@@ -532,83 +429,80 @@ static int gpio_parse_base_address(fdt_addr_t *gpio_base_addr)
 }
 
 /*
- * How to make it works ?
+ * Board revision list: <GPIO4_D1 | GPIO4_D0>
+ *  0b00 - NanoPC-T4
+ *  0b01 - NanoPi M4
  *
- * 1. pack dtb into rockchip resource.img, require:
- *    (1) file name end with ".dtb";
- *    (2) file name contains key words, like: ...#gpio[pin]=[value]...dtb
- *	  @pin: gpio name, eg. 0a2 means GPIO0A2;
- *	  @value: gpio level, 0 or 1;
- *    eg: ...#gpio0a6=1#gpio1c2=0....dtb
- *
- * 2. U-Boot dtsi about gpio node:
- *    (1) enable "u-boot,dm-pre-reloc;" for all gpio node;
- *    (2) set all gpio status "disabled"(Because we just want their property);
+ *  0b03 - Extended by ADC_IN4
+ *  0b04 - NanoPi NEO4
  */
-static int rockchip_read_dtb_by_gpio(const char *file_name)
+
+/*
+ * ID info:
+ *  ID : Volts : ADC value :   Bucket
+ *  ==   =====   =========   ===========
+ *   0 : 0.102V:        58 :    0 -   81
+ *
+ *  ------------------------------------
+ *  Reserved
+ *   1 : 0.211V:       120 :   82 -  150
+ *   2 : 0.319V:       181 :  151 -  211
+ *   3 : 0.427V:       242 :  212 -  274
+ *   4 : 0.542V:       307 :  275 -  342
+ *   5 : 0.666V:       378 :  343 -  411
+ *   6 : 0.781V:       444 :  412 -  477
+ *   7 : 0.900V:       511 :  478 -  545
+ *   8 : 1.023V:       581 :  546 -  613
+ *   9 : 1.137V:       646 :  614 -  675
+ *  10 : 1.240V:       704 :  676 -  733
+ *  11 : 1.343V:       763 :  734 -  795
+ *  12 : 1.457V:       828 :  796 -  861
+ *  13 : 1.576V:       895 :  862 -  925
+ *  14 : 1.684V:       956 :  926 -  989
+ *  15 : 1.800V:      1023 :  990 - 1023
+ */
+static const int id_readings[] = {
+   81, 150, 211, 274, 342, 411, 477, 545,
+  613, 675, 733, 795, 861, 925, 989, 1023
+};
+
+uint32_t rockchip_read_gpio(const char *name)
 {
-	static uint32_t cached_v[MAX_GPIO_NR];
 	fdt_addr_t gpio_base_addr[MAX_GPIO_NR];
-	int ret, found = 0, offset = strlen(KEY_WORDS_GPIO);
-	uint8_t port, pin, bank, lvl, val;
-	char *strgpio, *p;
-	uint32_t bit;
+	uint8_t port = *(name + 0) - '0';
+	uint8_t bank = *(name + 1) - 'a';
+	uint8_t pin  = *(name + 2) - '0';
 
-	debug("%s\n", file_name);
-
-	strgpio = strstr(file_name, KEY_WORDS_GPIO);
-	while (strgpio) {
-		debug("   - substr: %s\n", strgpio);
-
-		p = strgpio + offset;
-
-		/* Invalid format ? */
-		if (!(is_digit(*(p + 0)) && is_abcd(*(p + 1)) &&
-		      is_digit(*(p + 2)) && is_equal(*(p + 3)) &&
-		      is_digit(*(p + 4)))) {
-			debug("   - invalid format: %s\n", strgpio);
-			return -EINVAL;
-		}
-
-		/* Parse gpio address */
-		ret = gpio_parse_base_address(gpio_base_addr);
-		if (ret) {
-			debug("   - Can't parse gpio base address: %d\n", ret);
-			return ret;
-		}
-
-		/* Read gpio value */
-		port = *(p + 0) - '0';
-		bank = *(p + 1) - 'a';
-		pin  = *(p + 2) - '0';
-		lvl  = *(p + 4) - '0';
-
-		/*
-		 * It doesn't need to read gpio value every loop, reading once
-		 * is enough. We use cached_v[] to save what we have read, zero
-		 * means not read before.
-		 */
-		if (cached_v[port] == 0)
-			cached_v[port] =
-				readl(gpio_base_addr[port] + GPIO_EXT_PORT);
-
-		/* Verify result */
-		bit = bank * 8 + pin;
-		val = cached_v[port] & (1 << bit) ? 1 : 0;
-
-		if (val == !!lvl) {
-			found = 1;
-			strgpio = strstr(p, KEY_WORDS_GPIO);
-		} else {
-			found = 0;
-			break;
-		}
-
-		debug("   - parse: gpio%d%c%d=%d, read=%d %s\n",
-		      port, bank + 'a', pin, lvl, val, found ? "(Y)" : "");
+	int ret = gpio_parse_base_address(gpio_base_addr);
+	if (ret) {
+		debug("   - Can't parse gpio base address: %d\n", ret);
+		return -1;
 	}
 
-	return found ? 0 : -ENOENT;
+	uint32_t cached_v = readl(gpio_base_addr[port] + GPIO_EXT_PORT);
+	uint8_t bit = bank * 8 + pin;
+	uint8_t val = cached_v & (1 << bit) ? 1 : 0;
+
+	return val;
+}
+
+uint32_t rockchip_read_adc(int channel)
+{
+	uint32_t raw_adc = 0;
+	int ret = adc_channel_single_shot("saradc",
+                  channel, &raw_adc);
+	if (ret) {
+		printf("read adc, ret=%d\n", ret);
+	}
+
+	for (int i = 0; i < ARRAY_SIZE(id_readings); i++) {
+		if (raw_adc <= id_readings[i]) {
+			debug("ADC reading %d, ID %d\n", raw_adc, i);
+			return i;
+		}
+  }
+
+  return 0;
 }
 
 int rockchip_read_dtb_file(void *fdt_addr)
@@ -621,18 +515,21 @@ int rockchip_read_dtb_file(void *fdt_addr)
 	if (list_empty(&entrys_head))
 		init_resource_list(NULL);
 
+	uint32_t pcb_rev = rockchip_read_gpio("4d0") | rockchip_read_gpio("4d1") << 1;
+	if (pcb_rev == 0x3)
+		pcb_rev += rockchip_read_adc(4) + 1;
+	printf("board rev : %d\n", pcb_rev);
+
+	char target[64] = {0};
+	snprintf(target, ARRAY_SIZE(target),
+			"rk3399-nanopi4-rev%02x.dtb", pcb_rev);
+
 	list_for_each(node, &entrys_head) {
 		file = list_entry(node, struct resource_file, link);
 		if (!strstr(file->name, ".dtb"))
 			continue;
 
-		if (strstr(file->name, KEY_WORDS_ADC_CTRL) &&
-		    strstr(file->name, KEY_WORDS_ADC_CH) &&
-		    !rockchip_read_dtb_by_adc(file->name)) {
-			dtb_name = file->name;
-			break;
-		} else if (strstr(file->name, KEY_WORDS_GPIO) &&
-			   !rockchip_read_dtb_by_gpio(file->name)) {
+		if (strcmp(target, file->name) == 0) {
 			dtb_name = file->name;
 			break;
 		}

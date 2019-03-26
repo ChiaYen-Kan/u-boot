@@ -48,6 +48,8 @@ static int rkparm_param_parse(char *param, struct list_head *parts_head,
 	char *cmdline_end, *next, *pend;
 	int len, offset = 0;
 	unsigned long size, start;
+	char *mtd_start, *mtd_end;
+	char bootargs[1024];
 
 	if (!cmdline) {
 		debug("RKPARM: Invalid parameter part table from storage\n");
@@ -58,12 +60,25 @@ static int rkparm_param_parse(char *param, struct list_head *parts_head,
 	next = strchr(blkdev_parts, ':');
 	cmdline_end = strstr(cmdline, "\n"); /* end by '\n' */
 	*cmdline_end = '\0';
+
+	strncpy(bootargs, cmdline + strlen("CMDLINE:"), 1023);
+	if (dev_desc->devnum == 1)
+	{
+		mtd_start = strstr(bootargs, "mtdparts=");
+		if (mtd_start) {
+			mtd_end = strstr(mtd_start, " ");
+			if (mtd_end)
+				strcpy(mtd_start, mtd_end + 1);
+			else
+				*mtd_start = 0;
+		}
+	}
+
 	/*
-	 * 1. skip "CMDLINE:"
-	 * 2. Initrd fixup: remove unused "initrd=0x...,0x...", this for
-	 *    compatible with legacy parameter.txt
+	 * Initrd fixup: remove unused "initrd=0x...,0x...", this for
+	 * compatible with legacy parameter.txt
 	 */
-	env_update_filter("bootargs", cmdline + strlen("CMDLINE:"), "initrd=");
+	env_update_filter("bootargs", bootargs, "initrd=");
 
 	INIT_LIST_HEAD(parts_head);
 	while (next) {
